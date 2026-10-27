@@ -1,0 +1,86 @@
+// 1. 구글 드라이브 최상위 폴더 ID를 여기에 넣으세요
+const PARENT_FOLDER_ID = "1PXNe9jcLrOhczj7_2d8GqOV6j8R9aKsa";
+
+// 웹 앱 GET 요청 처리 (이미지 목록 불러오기)
+function doGet(e) {
+  try {
+    const images = getImagesFromDrive();
+    return ContentService.createTextOutput(JSON.stringify({ result: "success", data: images }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ result: "error", message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// 웹 앱 POST 요청 처리 (투표 데이터 저장 및 중복 체크)
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ result: "error", message: "접속자가 많아 잠시 후 다시 시도해주세요." }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Votes");
+    const data = JSON.parse(e.postData.contents);
+    const voterId = data.voterId;
+    const selections = data.selections; // [s1, s2, s3, s4, s5, s6, s7]
+
+    // 중복 투표 검증
+    const existingData = sheet.getDataRange().getValues();
+    for (let i = 1; i < existingData.length; i++) {
+      if (existingData[i][1].toString() === voterId.toString()) {
+        return ContentService.createTextOutput(JSON.stringify({ result: "duplicate", message: "이미 투표에 참여한 번호입니다." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    // 데이터 저장 (시간, 번호, 세션1~7 선택값)
+    const row = [new Date(), voterId, ...selections];
+    sheet.appendRow(row);
+
+    return ContentService.createTextOutput(JSON.stringify({ result: "success" }))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ result: "error", message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 드라이브의 session1~7 폴더에서 이미지 파일 링크 가져오기
+function getImagesFromDrive() {
+  const parentFolder = DriveApp.getFolderById(PARENT_FOLDER_ID);
+  const subFolders = parentFolder.getFolders();
+  const result = {};
+
+  while (subFolders.hasNext()) {
+    const folder = subFolders.next();
+    const folderName = folder.getName().toLowerCase().trim();
+    
+    if (folderName.startsWith("session")) {
+      const files = folder.getFiles();
+      const imgList = [];
+      
+      while (files.hasNext()) {
+        const file = files.next();
+        const mime = file.getMimeType();
+        if (mime.includes("image")) {
+          imgList.push({
+            id: file.getId(),
+            name: file.getName(),
+            url: "https://lh3.googleusercontent.com/d/" + file.getId()
+          });
+        }
+      }
+      imgList.sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: 'base'}));
+      result[folderName] = imgList;
+    }
+  }
+  return result;
+}
