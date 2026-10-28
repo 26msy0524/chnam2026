@@ -1,0 +1,33 @@
+name: Browser smoke test for photo voting
+on:
+  push:
+    paths:
+      - '.github/workflows/browser-voting-smoke.yml'
+permissions:
+  contents: read
+jobs:
+  browser-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check browser-rendered vote photos
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME=$(command -v google-chrome || command -v chromium || true)
+          if [ -z "$CHROME" ]; then echo 'Chrome is not available on the runner'; exit 1; fi
+          "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=25000 --dump-dom 'https://26msy0524.github.io/chnam2026/' > /tmp/voting-rendered.html 2>/tmp/voting-chrome.log
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,sys
+          html=Path('/tmp/voting-rendered.html').read_text(encoding='utf-8',errors='replace')
+          cards=len(re.findall(r'<button[^>]+class="photo-card',html))
+          notice=re.search(r'<p class="notice(?: [^"]*)?" id="notice"[^>]*>(.*?)</p>',html,re.S)
+          msg=re.sub(r'<[^>]*>','',notice.group(1)) if notice else '(no notice found)'
+          print('Rendered photo cards in Session 1:',cards)
+          print('Status message:',msg[:300])
+          if cards<1:
+              print('FAIL: Browser did not render photos from the live Google Drive source')
+              sys.exit(1)
+          print('PASS: Browser loaded live website and rendered Google Drive photo choices')
+          PY
