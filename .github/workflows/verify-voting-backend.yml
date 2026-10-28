@@ -1,0 +1,93 @@
+name: Verify Drive photo voting backend
+on:
+  push:
+    paths:
+      - '.github/workflows/verify-voting-backend.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check live Apps Script, Drive photos, and vote validation
+        shell: bash
+        env:
+          GAS_URL: https://script.google.com/macros/s/AKfycbypWbMzRlnjx1W0kTeVF0UZV85ZLUKxpHgNyEAg3mh4WEqfvgGf8jWMvt5VVBO79ABVdQ/exec
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.parse, urllib.error
+          from urllib.parse import urlparse
+          
+          URL = os.environ["GAS_URL"]
+          def request(url, data=None, method=None, timeout=30):
+              req = urllib.request.Request(url, data=data, method=method, headers={"User-Agent":"VotingBackendSmokeTest/1.0", "Content-Type":"text/plain;charset=UTF-8"})
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      return response.status, response.headers.get("Content-Type", ""), response.read(2000000).decode("utf-8", "replace"), response.geturl()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.headers.get("Content-Type", ""), e.read(1500).decode("utf-8","replace"), e.geturl()
+          
+          def get_jsonp(action, extras=None):
+              callback="votingBackendProbe"
+              query={"action":action, "callback":callback}
+              query.update(extras or {})
+              url=URL + "?" + urllib.parse.urlencode(query)
+              status, content_type, body, final = request(url)
+              print(f"GET {action}: status={status}, response-type={content_type.split(';')[0]}, redirect-host={urlparse(final).hostname}")
+              if status!=200:
+                  raise RuntimeError(f"GET {action} failed with HTTP {status}")
+              prefix=callback+"("
+              if not body.strip().startswith(prefix) or not body.strip().endswith(");"):
+                  raise RuntimeError(f"Server does not support JSONP for {action}. Redeploy latest Code.gs (existing version may return plain JSON).")
+              return json.loads(body.strip()[len(prefix):-2])
+          
+          def check_photo(url):
+              req=urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
+              try:
+                  with urllib.request.urlopen(req,timeout=20) as response:
+                      content_type=response.headers.get("Content-Type","").split(";")[0]
+                      code=response.status
+                      response.read(64)
+                      return code, content_type
+              except urllib.error.HTTPError as e:
+                  return e.code, e.headers.get("Content-Type","").split(";")[0]
+          
+          try:
+              images=get_jsonp("images")
+              if images.get("result")!="success":
+                  raise RuntimeError("Drive list API returned error: "+str(images.get("message", "unknown")))
+              folders=images.get("data") or {}
+              counts=[]
+              for i in range(1,8):
+                  rows=folders.get("session"+str(i),[])
+                  counts.append(len(rows))
+              print("Session photo counts:", counts)
+              if not all(c>0 for c in counts):
+                  raise RuntimeError("One or more of the 7 session folders have no accessible image records")
+              probe=get_jsonp("receipt",{"receipt":"diagnostic_test_receipt_20261028"})
+              if probe.get("result")!="success" or "confirmed" not in probe:
+                  raise RuntimeError("Receipt verification endpoint is missing or unavailable; update the deployed Code.gs")
+              print("Receipt read endpoint: OK")
+              bad_vote={"voterId":"DIAGNOSTIC_DO_NOT_SAVE_20261028","selections":["NOT_A_REAL_PHOTO_ID_0000000"]*7,"receipt":"diagnostic_test_receipt_20261028"}
+              status, ct, raw, final=request(URL, data=json.dumps(bad_vote).encode("utf-8"), method="POST")
+              print("POST validation: HTTP",status, "response-type",ct.split(";")[0])
+              if status!=200:
+                  raise RuntimeError("POST API not reachable")
+              posted=json.loads(raw)
+              message=str(posted.get("message",""))
+              if posted.get("result")!="error" or "사진이 유효하지" not in message:
+                  raise RuntimeError("POST did not return expected invalid-photo validation; response="+str(posted.get("result"))+" message="+message[:120])
+              print("Vote sheet access and invalid-photo rejection: OK (no ballot recorded)")
+              for i in range(1,8):
+                  photo=folders["session"+str(i)][0]
+                  status, ct=check_photo(photo["url"])
+                  print(f"Session {i} sample image: HTTP {status}, type={ct}")
+                  if status!=200 or not ct.startswith("image/"):
+                      raise RuntimeError(f"Session {i} image is not publicly renderable. Check Drive image sharing settings.")
+              print("PASS: seven sessions, Drive image retrieval, receipt query and safe POST validation; actual ballot storage not tested.")
+          except Exception as e:
+              print("FAIL:",str(e))
+              sys.exit(1)
+          PY
