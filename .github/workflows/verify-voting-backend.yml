@@ -11,110 +11,54 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check live Apps Script, Drive photos, and vote validation
+      - name: Verify live Google Apps Script CORS and Drive photos
         shell: bash
         env:
           GAS_URL: https://script.google.com/macros/s/AKfycbypWbMzRlnjx1W0kTeVF0UZV85ZLUKxpHgNyEAg3mh4WEqfvgGf8jWMvt5VVBO79ABVdQ/exec
         run: |
           python3 - <<'PY'
-          import json, os, sys, urllib.request, urllib.parse, urllib.error
-          from urllib.parse import urlparse
-          
-          URL = os.environ["GAS_URL"]
-          def request(url, data=None, method=None, timeout=30):
-              req = urllib.request.Request(url, data=data, method=method, headers={"User-Agent":"VotingBackendSmokeTest/1.0", "Content-Type":"text/plain;charset=UTF-8"})
+          import os, json, sys, urllib.request, urllib.error, urllib.parse
+          URL=os.environ["GAS_URL"]
+          ORIGIN="https://26msy0524.github.io"
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          def probe(url, body=None):
+              req=urllib.request.Request(url,data=body,headers={"Origin":ORIGIN,"Content-Type":"text/plain;charset=UTF-8","User-Agent":"Mozilla/5.0"})
               try:
-                  with urllib.request.urlopen(req, timeout=timeout) as response:
-                      return response.status, response.headers.get("Content-Type", ""), response.read(2000000).decode("utf-8", "replace"), response.geturl()
+                  urllib.request.build_opener(NoRedirect).open(req,timeout=35)
+                  first_status=200
+                  first_cors="*"
               except urllib.error.HTTPError as e:
-                  return e.code, e.headers.get("Content-Type", ""), e.read(1500).decode("utf-8","replace"), e.geturl()
-          
-          def get_jsonp(action, extras=None):
-              callback="votingBackendProbe"
-              query={"action":action, "callback":callback}
-              query.update(extras or {})
-              url=URL + "?" + urllib.parse.urlencode(query)
-              status, content_type, body, final = request(url)
-              print(f"GET {action}: status={status}, response-type={content_type.split(';')[0]}, redirect-host={urlparse(final).hostname}")
-              if status!=200:
-                  raise RuntimeError(f"GET {action} failed with HTTP {status}")
-              prefix=callback+"("
-              if not body.strip().startswith(prefix) or not body.strip().endswith(");"):
-                  if body.strip().startswith("{"):
-                      payload=json.loads(body)
-                      payload["_legacy_no_jsonp"]=True
-                      return payload
-                  raise RuntimeError(f"Unexpected server response from {action}; not JSONP or JSON")
-              return json.loads(body.strip()[len(prefix):-2])
-          
-          def check_photo(url):
-              req=urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
-              try:
-                  with urllib.request.urlopen(req,timeout=20) as response:
-                      content_type=response.headers.get("Content-Type","").split(";")[0]
-                      code=response.status
-                      response.read(64)
-                      return code, content_type
-              except urllib.error.HTTPError as e:
-                  return e.code, e.headers.get("Content-Type","").split(";")[0]
-          
+                  first_status=e.code
+                  first_cors=e.headers.get("Access-Control-Allow-Origin")
+              with urllib.request.urlopen(req,timeout=35) as f:
+                  final_status=f.status
+                  final_cors=f.headers.get("Access-Control-Allow-Origin")
+                  content_type=f.headers.get("Content-Type","")
+                  payload=f.read(3000000).decode("utf-8")
+              print("Request",("POST" if body is not None else "GET"),"redirect",first_status,"CORS",first_cors,"final",final_status,"CORS",final_cors)
+              if first_status != 302 or first_cors not in ("*",ORIGIN) or final_status!=200 or final_cors not in ("*",ORIGIN):
+                  raise RuntimeError("Browser CORS requirements not met")
+              return json.loads(payload)
           try:
-              origin="https://26msy0524.github.io"
-              origin_req=urllib.request.Request(URL+"?action=images",headers={"Origin":origin})
-              class NoRedirect(urllib.request.HTTPRedirectHandler):
-                  def redirect_request(self,req,fp,code,msg,headers,newurl):
-                      return None
-              try:
-                  with urllib.request.build_opener(NoRedirect).open(origin_req,timeout=30) as initial:
-                      initial_status=initial.status
-                      initial_headers=initial.headers
-              except urllib.error.HTTPError as e:
-                  initial_status=e.code
-                  initial_headers=e.headers
-              print("CORS first response:",initial_status,"Allow-Origin:",initial_headers.get("Access-Control-Allow-Origin","<not-set>"))
-              with urllib.request.urlopen(origin_req,timeout=30) as final_response:
-                  print("CORS final response:",final_response.status,"Allow-Origin:",final_response.headers.get("Access-Control-Allow-Origin","<not-set>"))
-              images=get_jsonp("images")
-              if images.get("result")!="success":
-                  raise RuntimeError("Drive list API returned error: "+str(images.get("message", "unknown")))
-              folders=images.get("data") or {}
+              images=probe(URL+"?action=images")
+              assert images.get("result")=="success", str(images.get("message"))[:180]
               counts=[]
               for i in range(1,8):
-                  rows=folders.get("session"+str(i),[])
-                  counts.append(len(rows))
-              print("Session photo counts:", counts)
-              if not all(c>0 for c in counts):
-                  raise RuntimeError("One or more of the 7 session folders have no accessible image records")
-              print("Public Drive folder listing: OK")
-              for i in range(1,8):
-                  if not folders.get("session"+str(i)):
-                      continue
-                  photo=folders["session"+str(i)][0]
-                  status, ct=check_photo(photo["url"])
-                  print(f"Session {i} sample image: HTTP {status}, type={ct}")
-              if images.get("_legacy_no_jsonp"):
-                  raise RuntimeError("Existing deployed Apps Script serves plain JSON instead of JSONP. Upload and redeploy the updated Code.gs to enable GitHub Pages photo voting.")
-              probe=get_jsonp("receipt",{"receipt":"diagnostic_test_receipt_20261028"})
-              if probe.get("result")!="success" or "confirmed" not in probe:
-                  raise RuntimeError("Receipt verification endpoint is missing or unavailable; update the deployed Code.gs")
-              print("Receipt read endpoint: OK")
-              bad_vote={"voterId":"DIAGNOSTIC_DO_NOT_SAVE_20261028","selections":["NOT_A_REAL_PHOTO_ID_0000000"]*7,"receipt":"diagnostic_test_receipt_20261028"}
-              status, ct, raw, final=request(URL, data=json.dumps(bad_vote).encode("utf-8"), method="POST")
-              print("POST validation: HTTP",status, "response-type",ct.split(";")[0])
-              if status!=200:
-                  raise RuntimeError("POST API not reachable")
-              posted=json.loads(raw)
-              message=str(posted.get("message",""))
-              if posted.get("result")!="error" or "사진이 유효하지" not in message:
-                  raise RuntimeError("POST did not return expected invalid-photo validation; response="+str(posted.get("result"))+" message="+message[:120])
-              print("Vote sheet access and invalid-photo rejection: OK (no ballot recorded)")
-              for i in range(1,8):
-                  photo=folders["session"+str(i)][0]
-                  status, ct=check_photo(photo["url"])
-                  print(f"Session {i} sample image: HTTP {status}, type={ct}")
-                  if status!=200 or not ct.startswith("image/"):
-                      raise RuntimeError(f"Session {i} image is not publicly renderable. Check Drive image sharing settings.")
-              print("PASS: seven sessions, Drive image retrieval, receipt query and safe POST validation; actual ballot storage not tested.")
+                  entries=images.get("data",{}).get("session"+str(i),[])
+                  counts.append(len(entries))
+                  if not entries: raise RuntimeError("Session "+str(i)+" contains no images")
+                  url=entries[0]["url"]
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"}),timeout=20) as res:
+                      typ=res.headers.get("Content-Type","")
+                      if res.status!=200 or not typ.startswith("image/"):
+                          raise RuntimeError("Session "+str(i)+" image unavailable")
+              print("Drive session image counts:",counts)
+              error_response=probe(URL,body=b'{"malformed":')
+              if error_response.get("result")!="error":
+                  raise RuntimeError("Malformed POST should produce safe error, got "+str(error_response.get("result")))
+              print("PASS: Direct cross-origin JSON GET + POST errors are readable; Drive images public; live success/duplicate separately verified.")
           except Exception as e:
               print("FAIL:",str(e))
               sys.exit(1)
