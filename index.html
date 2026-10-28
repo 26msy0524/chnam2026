@@ -43,22 +43,17 @@
   function submitMessage(text, type = '') {
     const node = el('submitNotice'); node.textContent = text; node.className = 'notice' + (type ? ' ' + type : '');
   }
-  function jsonp(params) {
-    return new Promise((resolve, reject) => {
-      if (!configured) {reject(new Error('Google Apps Script 웹 앱 주소가 설정되지 않았습니다.')); return;}
-      const callbackName = 'voteCb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-      const tag = document.createElement('script');
-      const url = new URL(APPS_SCRIPT_URL);
-      url.searchParams.set('callback', callbackName);
-      url.searchParams.set('_', Date.now().toString());
-      Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-      let settled = false;
-      const cleanup = () => {clearTimeout(timeout); tag.remove(); delete window[callbackName];};
-      window[callbackName] = data => {if (!settled) {settled = true; cleanup(); resolve(data);}};
-      tag.onerror = () => {if (!settled) {settled = true; cleanup(); reject(new Error('서버 연결에 실패했습니다. 웹 앱 URL과 공개 범위를 확인하세요.'));}};
-      const timeout = setTimeout(() => {if (!settled) {settled = true; cleanup(); reject(new Error('서버 응답 시간이 초과되었습니다.'));}}, 20000);
-      tag.src = url.toString(); document.head.appendChild(tag);
+  async function getBackendJson(params = {}) {
+    if (!configured) throw new Error('Google Apps Script 웹 앱 주소가 설정되지 않았습니다.');
+    const url = new URL(APPS_SCRIPT_URL);
+    Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
+    url.searchParams.set('_', String(Date.now()));
+    const response = await fetch(url.toString(), {
+      method: 'GET', mode: 'cors', redirect: 'follow', cache: 'no-store'
     });
+    if (!response.ok) throw new Error('사진 서버 HTTP ' + response.status + ' 오류');
+    try { return await response.json(); }
+    catch (_) { throw new Error('사진 서버 응답이 JSON 형식이 아닙니다.'); }
   }
   async function loadPhotos() {
     if (!configured) {
@@ -66,7 +61,7 @@
       render(); return;
     }
     try {
-      const response = await jsonp({action:'images'});
+      const response = await getBackendJson({action:'images'});
       if (response.result !== 'success') throw new Error(response.message || '사진 목록을 읽지 못했습니다.');
       for (let i = 0; i < NUM_SESSIONS; i++) {
         const data = response.data?.['session' + (i + 1)];
@@ -132,7 +127,6 @@
     el('submitNotice').classList.add('hidden');el('modalBackdrop').classList.remove('hidden');el('voterId').focus();
   }
   function closeReview() {if(busy)return;el('modalBackdrop').classList.add('hidden');}
-  const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
   async function sendVote(event) {
     event.preventDefault();if(busy)return;
     const voterId = el('voterId').value.trim();
@@ -143,17 +137,22 @@
     submitMessage('투표를 저장하고 결과를 확인하고 있습니다. 창을 닫지 마세요.');
     const receipt = 'v_' + Date.now() + '_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
     try {
-      // Apps Script ContentService는 CORS 응답 헤더를 제공하지 않으므로
-      // 쓰기는 no-cors POST, 확인은 무작위 영수증 키를 이용한 JSONP 조회로 처리합니다.
-      await fetch(APPS_SCRIPT_URL, {method:'POST', mode:'no-cors', redirect:'follow', cache:'no-store',
-        headers:{'Content-Type':'text/plain;charset=UTF-8'},
-        body:JSON.stringify({voterId, receipt, selections:chosen.map(x => x.id)})});
-      let confirmed = false;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await delay(attempt ? 1200 : 700);
-        try {const result = await jsonp({action:'receipt',receipt});if (result.result === 'success' && result.confirmed) {confirmed = true;break;}} catch(err) { /* 재조회 */ }
+      const response = await fetch(APPS_SCRIPT_URL, {
+        method: 'POST', mode: 'cors', redirect: 'follow', cache: 'no-store',
+        headers: {'Content-Type':'text/plain;charset=UTF-8'},
+        body: JSON.stringify({voterId, receipt, selections: chosen.map(x => x.id)})
+      });
+      if (!response.ok) throw new Error('투표 서버 HTTP ' + response.status + ' 오류');
+      let result;
+      try { result = await response.json(); }
+      catch (_) { throw new Error('서버의 투표 응답을 확인할 수 없습니다.'); }
+      if (result.result === 'duplicate') {
+        submitMessage('이미 투표에 참여한 번호입니다. 중복 투표는 허용되지 않습니다.', 'error');
+        return;
       }
-      if (!confirmed) throw new Error('저장이 확인되지 않았습니다. 이미 참여한 번호이거나 서버 오류일 수 있습니다. 운영자에게 확인해 주세요.');
+      if (result.result !== 'success') {
+        throw new Error(result.message || '투표 저장에 실패했습니다. 운영자에게 문의해 주세요.');
+      }
       el('modalBackdrop').classList.add('hidden');
       el('tabs').closest('.panel').classList.add('hidden');
       const panel = el('votePanel');panel.replaceChildren();panel.className='panel complete';
