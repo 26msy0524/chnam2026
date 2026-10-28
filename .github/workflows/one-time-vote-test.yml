@@ -1,0 +1,53 @@
+name: One-time production ballot storage test
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-vote-test.yml'
+permissions:
+  contents: read
+jobs:
+  submit-diagnostic-ballot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Submit TEST ballot and verify duplicate rejection
+        shell: bash
+        env:
+          GAS_URL: https://script.google.com/macros/s/AKfycbypWbMzRlnjx1W0kTeVF0UZV85ZLUKxpHgNyEAg3mh4WEqfvgGf8jWMvt5VVBO79ABVdQ/exec
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.parse, urllib.error, json, os, sys
+          URL=os.environ["GAS_URL"]
+          VOTER_ID="SYSTEM_TEST_ONLY_20261028_1435"
+          def call(url, payload=None):
+              headers={"Content-Type":"text/plain;charset=UTF-8","User-Agent":"VotingSystemDiagnostic/1.0"}
+              req=urllib.request.Request(url, data=json.dumps(payload).encode("utf-8") if payload is not None else None, headers=headers)
+              with urllib.request.urlopen(req,timeout=40) as f:
+                  return f.status,json.loads(f.read().decode("utf-8"))
+          try:
+              _, images=call(URL)
+              assert images.get("result")=="success", "Unable to load image list"
+              data=images["data"]
+              selected=[]
+              for session in range(1,8):
+                  rows=data.get("session"+str(session),[])
+                  assert rows, "Session {} has no image".format(session)
+                  selected.append(rows[0]["id"])
+              # This writes exactly one clearly marked TEST vote to the production Votes sheet.
+              ballot={"voterId":VOTER_ID,"selections":selected,"receipt":"test_vote_20261028_1435_aabbccdd"}
+              status, first=call(URL,ballot)
+              print("First submission: HTTP",status,"result",first.get("result"))
+              if first.get("result")!="success":
+                  print("Failure message:",str(first.get("message",""))[:150])
+                  sys.exit(1)
+              status, second=call(URL,ballot)
+              print("Repeated submission: HTTP",status,"result",second.get("result"))
+              if second.get("result")!="duplicate":
+                  print("Unexpected duplicate check response:",str(second.get("message",""))[:150])
+                  sys.exit(1)
+              print("PASS: Photo IDs loaded, vote stored, duplicate vote rejected.")
+              print("IMPORTANT: Remove test voter ID SYSTEM_TEST_ONLY_20261028_1435 from Votes sheet before counting results.")
+          except Exception as exc:
+              print("FAIL:",str(exc))
+              sys.exit(1)
+          PY
