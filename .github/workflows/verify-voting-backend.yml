@@ -59,6 +59,21 @@ jobs:
                   return e.code, e.headers.get("Content-Type","").split(";")[0]
           
           try:
+              origin="https://26msy0524.github.io"
+              origin_req=urllib.request.Request(URL+"?action=images",headers={"Origin":origin})
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,req,fp,code,msg,headers,newurl):
+                      return None
+              try:
+                  with urllib.request.build_opener(NoRedirect).open(origin_req,timeout=30) as initial:
+                      initial_status=initial.status
+                      initial_headers=initial.headers
+              except urllib.error.HTTPError as e:
+                  initial_status=e.code
+                  initial_headers=e.headers
+              print("CORS first response:",initial_status,"Allow-Origin:",initial_headers.get("Access-Control-Allow-Origin","<not-set>"))
+              with urllib.request.urlopen(origin_req,timeout=30) as final_response:
+                  print("CORS final response:",final_response.status,"Allow-Origin:",final_response.headers.get("Access-Control-Allow-Origin","<not-set>"))
               images=get_jsonp("images")
               if images.get("result")!="success":
                   raise RuntimeError("Drive list API returned error: "+str(images.get("message", "unknown")))
